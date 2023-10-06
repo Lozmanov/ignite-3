@@ -1,0 +1,91 @@
+name: "AI3 to GG sync"
+on:
+  push:
+    branches: ["GG-37299"]
+
+jobs:
+  sync:
+    env:
+      SYNC_BRANCH: "main"
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Prepare
+        id: prepare
+        run: |
+          PR_NUMBER=$(gh pr list -H ai/$SYNC_BRANCH -B main --json number --jq .[0].number )
+          if [ "${PR_NUMBER}" ]; then
+            echo "Previous PR ${PR_NUMBER} still exists. Skipping..."
+            echo "PR_EXIST=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git branch -D ai/$SYNC_BRANCH || true
+          git fetch -u $AI $SYNC_BRANCH:ai/$SYNC_BRANCH
+          git push origin ai/$SYNC_BRANCH --force
+        env:
+          AI: "https://github.com/apache/ignite-3.git"
+
+      - name: Create PR
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        run: gh pr create -B "$SYNC_BRANCH" -H "ai/$SYNC_BRANCH" -t "Merge Apache Ignite to GG9" -F ".github/PULL_REQUEST_TEMPLATE.md"
+
+      - name: Check PR state
+        id: pr
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        run: |
+          PR_NUMBER=$(gh pr list -H ai/$SYNC_BRANCH -B $SYNC_BRANCH --json number --jq .[0].number)
+          gh pr checkout $PR_NUMBER
+
+          MERGEABLE=$(gh pr status -c --json mergeable --jq .currentBranch.mergeable) #CONFLICTING or MERGEABLE
+          COMMIT_AUTHOR_EMAILS=$(gh pr status --json commits --jq .currentBranch.commits.[].authors[0].email | sort | uniq | tr '\n' '\7' | sed 's/\x7/\\n/g')
+          echo "$COMMIT_AUTHOR_EMAILS"
+          echo "COMMIT_AUTHOR_EMAILS=$COMMIT_AUTHOR_EMAILS" >> $GITHUB_OUTPUT
+
+          if [ $MERGEABLE = "CONFLICTING" ]; then
+            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to conflicts" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          gh pr checks --watch $PR_NUMBER --fail-fast -i 60 || PR_CHECKS_FAILED=true
+
+          #sleep 120 #Workaround when PR checks have not yet started
+
+          if [ "$PR_CHECKS_FAILED" = true ]; then
+            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to checks fail or checks don't exist" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          gh pr merge -m $PR_NUMBER
+        env:
+          PR_CHECKS_FAILED: false
+
+      - name: Send slack notification
+        if: ${{ failure() && steps.pr.conclusion == 'failure' }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "🔴 *Github action: \"Merge Apache Ignite to GG9\" is ${{ job.status }}*",
+              "attachments": [
+                {
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "<https://github.com/ggprivate/gridgain-9/actions/runs/${{ github.run_id }}|Github Action URL>\n${{ env.MESSAGE }}\nCommits authors:\n${{ env.COMMIT_AUTHOR_EMAILS }}"
+                      }
+                    }
+                  ],
+                  "color": "#ff0000"
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          MESSAGE: ${{ steps.pr.outputs.MESSAGE }}
+          COMMIT_AUTHOR_EMAILS: ${{ steps.pr.outputs.COMMIT_AUTHOR_EMAILS }}
+
+
