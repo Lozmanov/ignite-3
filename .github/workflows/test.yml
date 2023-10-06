@@ -1,0 +1,29 @@
+name: "Test"
+on:
+  push:
+    branches: ["GG-37299"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Prepare
+        run: sudo apt install hub -y
+
+      - name: test
+        run: |
+          ls -lah
+          git fetch -u $AI $BRANCH:ai/$BRANCH
+          git push origin ai/$BRANCH
+        env:
+          AI: "https://github.com/apache/ignite-3.git"
+          BRANCH: "main"
+
+      - name: List open pull requests
+        run: |
+          hub pr list
+          hub pull-request -b "$BRANCH" -h "ai/$BRANCH" -m "test"
+        env:
+          BRANCH: "main"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
