@@ -1,0 +1,23 @@
+fragment branchProtection on BranchProtectionRule {
+  id
+  pattern
+  lockBranch
+}
+
+mutation lockMainBranch($repositoryId:ID!, $branch:String!) {
+  createBranchProtectionRule(input: {
+    pattern: $branch
+    repositoryId: $repositoryId
+    lockBranch: true
+  }) {
+    branchProtectionRule {
+      ...branchProtection
+    }
+  }
+}
+
+mutation deleteBranchProtection($ruleId:ID!) {
+  deleteBranchProtectionRule(input:{branchProtectionRuleId:$ruleId}) {
+    clientMutationId
+  }
+}

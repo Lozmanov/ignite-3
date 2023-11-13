@@ -3,70 +3,157 @@ on:
   push:
     branches: ["GG-37299"]
 
+
 jobs:
   sync:
     env:
       SYNC_BRANCH: "main"
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      AI: "https://github.com/apache/ignite-3.git"
+      GG_BRANCH: "test-main"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
       - name: Prepare
         id: prepare
         run: |
-          PR_NUMBER=$(gh pr list -H ai/$SYNC_BRANCH -B main --json number --jq .[0].number )
+          GIT_BRANCH=${GITHUB_BASE_REF:-${GITHUB_REF#refs/heads/}}
+          echo "GIT_BRANCH=$GIT_BRANCH" >> $GITHUB_ENV
+          PR_NUMBER=$(gh pr list -H "ai/$SYNC_BRANCH" -B "$GG_BRANCH" --json number --jq .[0].number )
           if [ "${PR_NUMBER}" ]; then
             echo "Previous PR ${PR_NUMBER} still exists. Skipping..."
             echo "PR_EXIST=true" >> "$GITHUB_OUTPUT"
+            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> still exists. Skipping..." >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git branch -D ai/$SYNC_BRANCH || true
-          git fetch -u $AI $SYNC_BRANCH:ai/$SYNC_BRANCH
-          git push origin ai/$SYNC_BRANCH --force
-        env:
-          AI: "https://github.com/apache/ignite-3.git"
-
-      - name: Create PR
-        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
-        run: gh pr create -B "$SYNC_BRANCH" -H "ai/$SYNC_BRANCH" -t "Merge Apache Ignite to GG9" -F ".github/PULL_REQUEST_TEMPLATE.md"
-
-      - name: Check PR state
-        id: pr
-        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
-        run: |
-          PR_NUMBER=$(gh pr list -H ai/$SYNC_BRANCH -B $SYNC_BRANCH --json number --jq .[0].number)
-          gh pr checkout $PR_NUMBER
-
-          MERGEABLE=$(gh pr status -c --json mergeable --jq .currentBranch.mergeable) #CONFLICTING or MERGEABLE
-          COMMIT_AUTHOR_EMAILS=$(gh pr status --json commits --jq .currentBranch.commits.[].authors[0].email | sort | uniq | tr '\n' '\7' | sed 's/\x7/\\n/g')
-          echo "$COMMIT_AUTHOR_EMAILS"
-          echo "COMMIT_AUTHOR_EMAILS=$COMMIT_AUTHOR_EMAILS" >> $GITHUB_OUTPUT
-
-          if [ $MERGEABLE = "CONFLICTING" ]; then
-            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to conflicts" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          gh pr checks --watch $PR_NUMBER --fail-fast -i 60 || PR_CHECKS_FAILED=true
-
-          #sleep 120 #Workaround when PR checks have not yet started
-
-          if [ "$PR_CHECKS_FAILED" = true ]; then
-            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to checks fail or checks don't exist" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          gh pr merge -m $PR_NUMBER
-        env:
-          PR_CHECKS_FAILED: false
 
       - name: Send slack notification
-        if: ${{ failure() && steps.pr.conclusion == 'failure' }}
+        if: ${{ steps.prepare.outputs.PR_EXIST != '' }}
         uses: slackapi/slack-github-action@v1.24.0
         with:
           payload: |
             {
-              "text": "🔴 *Github action: \"Merge Apache Ignite to GG9\" is ${{ job.status }}*",
+              "text": "*Github action: \"Merge Apache Ignite to GG9\" has been skipped*",
+              "attachments": [
+                {
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "<https://github.com/ggprivate/gridgain-9/actions/runs/${{ github.run_id }}|Github Action URL>\n${{ env.MESSAGE }}\n"
+                      }
+                    }
+                  ],
+                  "color": "#EBB424"
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          MESSAGE: ${{ steps.prepare.outputs.MESSAGE }}
+
+      - name: Prepare GG9 branch
+        if: env.GG_BRANCH != 'main'
+        run: |
+          set -x
+          git fetch
+          git branch -D "$GG_BRANCH" || true
+          git branch "$GG_BRANCH" "origin/$SYNC_BRANCH"
+          git push origin -u "$GG_BRANCH" --force
+
+      - name: Lock GG9 branch
+        id: lock
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        run: |
+          repo_id=$(gh repo view --json id --jq .id)
+          rule_id=$(gh api graphql -f query="$(cat .github/workflows/graphql.gql)" -f operationName=lockMainBranch -F repositoryId="$repo_id" -F branch="$GG_BRANCH" --jq .data.createBranchProtectionRule.branchProtectionRule.id)
+          echo "PROTECTION_RULE_ID=$rule_id" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR
+        id: pr
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        run: |
+          set -x
+          git branch -D ai/$SYNC_BRANCH || true
+          git branch -D gg/$SYNC_BRANCH || true
+
+          git fetch -u $AI $SYNC_BRANCH:ai/$SYNC_BRANCH
+          git checkout -b gg/$SYNC_BRANCH $GG_BRANCH
+
+          git merge -m "Merge 'apache/main' into main" "ai/$SYNC_BRANCH" || CONFLICT=true
+
+          COMMIT_AUTHOR_EMAILS=$(git log gg/$SYNC_BRANCH..ai/$SYNC_BRANCH --pretty=format:"%ae" | sort | uniq | tr '\n' '\7' | sed 's/\x7/\\n/g')
+          echo "COMMIT_AUTHOR_EMAILS=$COMMIT_AUTHOR_EMAILS" >> "$GITHUB_OUTPUT"
+
+          if [ "$CONFLICT" = true ]; then
+            echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to conflicts" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          git push origin gg/$SYNC_BRANCH --force
+          gh pr create -B "$GG_BRANCH" -H "gg/$SYNC_BRANCH" -t "Merge Apache Ignite to GG9" -F ".github/PULL_REQUEST_TEMPLATE.md"
+
+      - name: Check PR state
+        id: pr_check
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        run: |
+          set -x
+          PR_NUMBER=$(gh pr list -H gg/$SYNC_BRANCH -B $GG_BRANCH --json number --jq .[0].number)
+
+          sleep 120 #Workaround when PR checks have not yet started
+
+          gh pr checks --watch $PR_NUMBER --fail-fast -i 60 || PR_CHECKS_FAILED=true
+
+          gh pr close $PR_NUMBER
+          echo "$PR_CHECKS_FAILED"
+          #if [ "$PR_CHECKS_FAILED" = true ]; then
+          #  echo "MESSAGE=<https://github.com/ggprivate/gridgain-9/pull/${PR_NUMBER}|PR ${PR_NUMBER}> can't be merged, due to checks fail or checks don't exist" >> "$GITHUB_OUTPUT"
+          #  exit 1
+          #fi
+
+        env:
+          PR_CHECKS_FAILED: false
+
+      - name: Unlock GG9 branch
+        if: ${{ always() && steps.lock.outputs.PROTECTION_RULE_ID != '' }}
+        run: |
+          git checkout "${{ env.GIT_BRANCH }}"
+          gh api graphql -f query="$(cat .github/workflows/graphql.gql)" -f operationName=deleteBranchProtection -F ruleId="${{ env.PROTECTION_RULE_ID }}" || true
+        env:
+          PROTECTION_RULE_ID: ${{ steps.lock.outputs.PROTECTION_RULE_ID }}
+
+
+      - name: Merge AI3 to GG9
+        if: ${{ steps.prepare.outputs.PR_EXIST == '' }}
+        id: merge
+        run: |
+          git fetch
+          git checkout "$GG_BRANCH"
+          git merge --ff-only "gg/$SYNC_BRANCH"
+          git push origin "$GG_BRANCH"
+          echo "MESSAGE=Changes from AI3 to GG9 main successfully merged to $GG_BRANCH branch" >> "$GITHUB_OUTPUT"
+
+
+      - name: Prepare slack notification
+        if: ${{ failure() && ( steps.pr.conclusion == 'failure' || steps.pr_check.conclusion == 'failure' ) }}
+        id: slack
+        run: |
+          PR_SLACK_MESSAGE="${{ steps.pr.outputs.MESSAGE }}"
+          PR_CHECK_SLACK_MESSAGE="${{ steps.pr_check.outputs.MESSAGE }}"
+          [ -z "${PR_SLACK_MESSAGE}" ] && SLACK_MESSAGE="$PR_SLACK_MESSAGE"
+          [ -z "${PR_CHECK_SLACK_MESSAGE}" ] && SLACK_MESSAGE="$PR_CHECK_SLACK_MESSAGE"
+
+          echo "MESSAGE=$SLACK_MESSAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Send fail slack notification
+        if: ${{ failure() && ( steps.pr.conclusion == 'failure' || steps.pr_check.conclusion == 'failure' ) }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "🔴 *Github action: \"Merge Apache Ignite to GG9\" ${{ job.status }}*",
               "attachments": [
                 {
                   "blocks": [
@@ -85,7 +172,32 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-          MESSAGE: ${{ steps.pr.outputs.MESSAGE }}
+          MESSAGE: ${{ steps.slack.outputs.MESSAGE }}
           COMMIT_AUTHOR_EMAILS: ${{ steps.pr.outputs.COMMIT_AUTHOR_EMAILS }}
 
-
+      - name: Send success slack notification
+        if: ${{ success() && ( steps.merge.conclusion == 'success' || steps.merge.conclusion == 'skipped') }}
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "*Github action: \"Merge Apache Ignite to GG9\" ${{ job.status }}*",
+              "attachments": [
+                {
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": "<https://github.com/ggprivate/gridgain-9/actions/runs/${{ github.run_id }}|Github Action URL>\n${{ env.MESSAGE }}\n"
+                      }
+                    }
+                  ],
+                  "color": "#2EB67D"
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          MESSAGE: ${{ steps.merge.outputs.MESSAGE }}
