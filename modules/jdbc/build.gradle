@@ -38,12 +38,6 @@ dependencies {
     testImplementation libs.mockito.core
     testImplementation libs.hamcrest.core
 
-    integrationTestImplementation testFixtures(project(":ignite-api"))
-    integrationTestImplementation testFixtures(project(":ignite-core"))
-    integrationTestImplementation testFixtures(project(":ignite-sql-engine"))
-    integrationTestImplementation testFixtures(project(':ignite-jdbc'))
-    integrationTestImplementation project(":ignite-runner")
-    integrationTestImplementation project(":ignite-api")
 
     testFixturesImplementation testFixtures(project(":ignite-core"))
     testFixturesImplementation libs.hamcrest.core
